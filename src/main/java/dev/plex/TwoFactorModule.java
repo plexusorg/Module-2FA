@@ -1,0 +1,122 @@
+package dev.plex;
+
+import dev.plex.api.storage.ModuleStorage;
+import dev.plex.auth.AccountClassifier;
+import dev.plex.auth.AuthenticationManager;
+import dev.plex.command.TwoFactorCommand;
+import dev.plex.crypto.SecretEncryption;
+import dev.plex.crypto.TotpService;
+import dev.plex.dialog.TwoFactorDialogService;
+import dev.plex.integration.LuckPermsPermissionDataBridge;
+import dev.plex.integration.PermissionDataBridge;
+import dev.plex.listener.AuthenticationListener;
+import dev.plex.module.PlexModule;
+import dev.plex.storage.TwoFactorRepository;
+import dev.plex.storage.PremiumIdentityRepository;
+import java.io.IOException;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
+import org.bukkit.Bukkit;
+import org.bukkit.permissions.Permission;
+import org.bukkit.permissions.PermissionDefault;
+import org.bukkit.plugin.PluginManager;
+
+public final class TwoFactorModule extends PlexModule
+{
+    private AuthenticationManager authenticationManager;
+    private final List<Permission> registeredPermissions = new ArrayList<>();
+
+    @Override
+    public void load()
+    {
+        registerCommand(new TwoFactorCommand(this));
+    }
+
+    @Override
+    public void enable()
+    {
+        ModuleStorage storage = api().storage().forModule(this);
+        try
+        {
+            storage.migrations().run(List.of("001_initial_schema", "002_authentication_throttle", "003_premium_identities", "004_backfill_premium_identities"));
+            SecretEncryption encryption = SecretEncryption.load(getDataFolder().toPath());
+            TwoFactorRepository repository = new TwoFactorRepository(storage, api().scheduler().asyncExecutor(), encryption);
+            PremiumIdentityRepository identityRepository = new PremiumIdentityRepository(storage, api().scheduler().asyncExecutor());
+            PermissionDataBridge permissionDataBridge = permissionDataBridge();
+            authenticationManager = new AuthenticationManager(
+                    this,
+                    new AccountClassifier(identityRepository, repository, permissionDataBridge),
+                    repository,
+                    identityRepository,
+                    permissionDataBridge,
+                    new TotpService(),
+                    new TwoFactorDialogService());
+        }
+        catch (SQLException | IOException exception)
+        {
+            throw new IllegalStateException("Unable to initialize two-factor authentication", exception);
+        }
+
+        registerPermissions();
+        registerListener(new AuthenticationListener(authenticationManager));
+        Bukkit.getOnlinePlayers().forEach(player -> api().scheduler().runEntity(player, () -> authenticationManager.handleJoin(player)));
+        getLogger().warn("Offline-mode v4 UUID claims are trusted and installed as player UUIDs; modified clients can spoof these identities");
+        getLogger().info("Two-factor authentication enabled");
+    }
+
+    @Override
+    public void disable()
+    {
+        if (authenticationManager != null)
+        {
+            authenticationManager.shutdown();
+        }
+        PluginManager pluginManager = Bukkit.getPluginManager();
+        registeredPermissions.forEach(pluginManager::removePermission);
+        registeredPermissions.clear();
+    }
+
+    public AuthenticationManager authenticationManager()
+    {
+        if (authenticationManager == null)
+        {
+            throw new IllegalStateException("Two-factor authentication is not enabled");
+        }
+        return authenticationManager;
+    }
+
+    private void registerPermissions()
+    {
+        PluginManager pluginManager = Bukkit.getPluginManager();
+        for (String node : TwoFactorPermissions.ALL)
+        {
+            if (pluginManager.getPermission(node) != null)
+            {
+                continue;
+            }
+            Permission permission = new Permission(node, PermissionDefault.FALSE);
+            pluginManager.addPermission(permission);
+            registeredPermissions.add(permission);
+        }
+    }
+
+    private PermissionDataBridge permissionDataBridge()
+    {
+        if (!Bukkit.getPluginManager().isPluginEnabled("LuckPerms"))
+        {
+            return PermissionDataBridge.unavailable();
+        }
+        try
+        {
+            PermissionDataBridge bridge = LuckPermsPermissionDataBridge.fromServices();
+            getLogger().info("LuckPerms UUID cache reconciliation enabled");
+            return bridge;
+        }
+        catch (LinkageError | RuntimeException exception)
+        {
+            getLogger().warn("LuckPerms is present but its API is unavailable to Module-2FA", exception);
+            return PermissionDataBridge.unavailable();
+        }
+    }
+}
