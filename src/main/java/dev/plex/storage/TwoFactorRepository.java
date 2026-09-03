@@ -4,7 +4,6 @@ import dev.plex.api.storage.ModuleStorage;
 import dev.plex.crypto.EncryptedSecret;
 import dev.plex.crypto.SecretEncryption;
 import java.time.Instant;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -93,30 +92,6 @@ public final class TwoFactorRepository
             catch (RuntimeException exception)
             {
                 throw new IllegalStateException("Failed to load two-factor account UUIDs", exception);
-            }
-        }, executor);
-    }
-
-    public CompletableFuture<List<UUID>> findPlayerUuidsByName(String username)
-    {
-        return CompletableFuture.supplyAsync(() ->
-        {
-            try
-            {
-                return jdbi.withHandle(handle -> handle.createQuery(
-                                "SELECT uuid FROM players WHERE LOWER(last_known_name) = LOWER(:username)")
-                        .bind("username", username)
-                        .mapTo(String.class)
-                        .list()
-                        .stream()
-                        .map(UUID::fromString)
-                        .filter(playerUuid -> playerUuid.version() == 3 || playerUuid.version() == 4)
-                        .sorted(Comparator.comparingInt(playerUuid -> playerUuid.version() == 4 ? 0 : 1))
-                        .toList());
-            }
-            catch (RuntimeException exception)
-            {
-                throw new IllegalStateException("Failed to resolve two-factor account by player name", exception);
             }
         }, executor);
     }

@@ -10,12 +10,16 @@ import dev.plex.storage.PremiumIdentityRepository;
 import dev.plex.storage.TwoFactorAccount;
 import dev.plex.storage.TwoFactorRepository;
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.entity.Player;
@@ -210,7 +214,7 @@ public final class AuthenticationManager
         {
             synchronized (session)
             {
-                session.phase(AuthenticationPhase.RESETTING);
+                session.beginReset();
                 deletion = repository.delete(playerUuid).thenCompose(ignored -> identityRepository.delete(playerUuid));
             }
             deletion.whenComplete((unused, throwable) -> onPlayerThread(session.player(), () ->
@@ -296,30 +300,66 @@ public final class AuthenticationManager
         }
         synchronized (session)
         {
-            if (!isCurrent(player, session) || session.phase() != AuthenticationPhase.AWAITING_ENROLLMENT_APPROVAL)
+            if (!isCurrent(player, session) || !session.authorizeEnrollment())
             {
                 return false;
             }
-            session.authorizeEnrollment();
             startEnrollment(player, session);
             return true;
         }
     }
 
-    public void shutdown()
+    public CompletableFuture<Void> shutdown()
     {
-        sessions.values().forEach(session -> onPlayerThread(session.player(), () ->
+        List<AuthenticationSession> pending = new ArrayList<>();
+        for (AuthenticationSession session : List.copyOf(sessions.values()))
         {
             if (!sessions.remove(session.player().getUniqueId(), session))
             {
+                continue;
+            }
+            pending.add(session);
+        }
+
+        Component reason = Component.text(
+                "Two-factor authentication was disabled while your login was pending.", NamedTextColor.RED);
+        pending.forEach(session -> module.kickPlayerOnShutdown(session.player(), reason));
+        authenticatedPlayers.clear();
+
+        return CompletableFuture.runAsync(() -> reconcileForShutdown(pending), module.executor());
+    }
+
+    private void reconcileForShutdown(List<AuthenticationSession> pending)
+    {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        for (AuthenticationSession session : pending)
+        {
+            if (!session.requiresIdentityReconciliation())
+            {
+                continue;
+            }
+            try
+            {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0)
+                {
+                    module.getLogger().warn("Timed out waiting for LuckPerms reconciliation during two-factor shutdown");
+                    return;
+                }
+                permissionDataBridge.reconcileForShutdown(
+                        session.crackedUuid(), session.premiumUuid(), session.player().getName(), remaining);
+            }
+            catch (InterruptedException exception)
+            {
+                Thread.currentThread().interrupt();
+                logReconciliationFailure(session.player(), exception);
                 return;
             }
-            session.player().kick(Component.text(
-                    "Two-factor authentication was disabled while your login was pending.", NamedTextColor.RED));
-            reconcileIdentity(session).whenComplete(
-                    (ignored, throwable) -> logReconciliationFailure(session.player(), throwable));
-        }));
-        authenticatedPlayers.clear();
+            catch (Exception exception)
+            {
+                logReconciliationFailure(session.player(), exception);
+            }
+        }
     }
 
     private void beginPrompt(Player player, AuthenticationSession session, Optional<TwoFactorAccount> account)
@@ -336,15 +376,14 @@ public final class AuthenticationManager
                         NamedTextColor.RED));
                 return;
             }
-            session.account(existingAccount);
-            session.phase(AuthenticationPhase.VERIFYING);
+            session.beginVerification(existingAccount);
             openVerification(player, session, null);
             return;
         }
 
         if (!session.enrollmentAuthorized())
         {
-            session.phase(AuthenticationPhase.AWAITING_ENROLLMENT_APPROVAL);
+            session.awaitEnrollmentApproval();
             openEnrollmentApproval(player);
             module.getLogger().warn("Player {} requires administrator approval before first-time 2FA enrollment", player.getName());
             return;
@@ -354,8 +393,7 @@ public final class AuthenticationManager
 
     private void startEnrollment(Player player, AuthenticationSession session)
     {
-        session.pendingSecret(totpService.generateSecret());
-        session.phase(AuthenticationPhase.ENROLLING);
+        session.beginEnrollment(totpService.generateSecret());
         openEnrollment(player, session, null);
     }
 
@@ -397,15 +435,17 @@ public final class AuthenticationManager
 
     private void switchToChat(Player player, AuthenticationSession session)
     {
-        if (!isCurrent(player, session)
-                || (session.phase() != AuthenticationPhase.ENROLLING
-                && session.phase() != AuthenticationPhase.VERIFYING))
+        if (!isCurrent(player, session))
         {
             return;
         }
-        session.chatInputMode(true);
+        AuthenticationPhase phase = session.enableChatInput();
+        if (phase == null)
+        {
+            return;
+        }
         player.closeDialog();
-        if (session.phase() == AuthenticationPhase.ENROLLING)
+        if (phase == AuthenticationPhase.ENROLLING)
         {
             dialogService.sendEnrollmentChatPrompt(player, session.pendingSecret(), null);
         }
@@ -432,7 +472,10 @@ public final class AuthenticationManager
                 return;
             }
 
-            session.phase(AuthenticationPhase.PROCESSING);
+            if (!session.transition(AuthenticationPhase.ENROLLING, AuthenticationPhase.PROCESSING))
+            {
+                return;
+            }
             creation = repository.create(player.getUniqueId(), session.pendingSecret(), matchingStep.getAsLong());
         }
 
@@ -469,7 +512,10 @@ public final class AuthenticationManager
                 return;
             }
 
-            session.phase(AuthenticationPhase.PROCESSING);
+            if (!session.transition(AuthenticationPhase.VERIFYING, AuthenticationPhase.PROCESSING))
+            {
+                return;
+            }
             consumption = repository.consumeStep(player.getUniqueId(), matchingStep.getAsLong());
         }
 
@@ -500,7 +546,6 @@ public final class AuthenticationManager
             kick(player, session, Component.text("Too many failed two-factor authentication attempts.", NamedTextColor.RED));
             return;
         }
-        session.phase(phase);
         if (phase == AuthenticationPhase.ENROLLING)
         {
             openEnrollment(player, session, message);
@@ -518,7 +563,10 @@ public final class AuthenticationManager
             return;
         }
 
-        session.phase(AuthenticationPhase.PROCESSING);
+        if (!session.prepareFailedVerification())
+        {
+            return;
+        }
         AddressAttemptLimiter.State addressThrottle = addressAttemptLimiter.recordFailure(
                 player.getUniqueId(),
                 address(player),
@@ -559,7 +607,7 @@ public final class AuthenticationManager
                     }
 
                     int remainingAttempts = MAX_ATTEMPTS - throttle.failedAttempts();
-                    session.phase(AuthenticationPhase.VERIFYING);
+                    session.transition(AuthenticationPhase.PROCESSING, AuthenticationPhase.VERIFYING);
                     openVerification(player, session, message + " " + remainingAttempts + " attempts remain.");
                 }));
     }
@@ -570,7 +618,6 @@ public final class AuthenticationManager
         {
             return;
         }
-        session.phase(AuthenticationPhase.PROCESSING);
         finalizeIdentity(player, session).whenComplete((ignored, throwable) -> onPlayerThread(player, () ->
         {
             if (!isCurrent(player, session) || session.phase() != AuthenticationPhase.PROCESSING)
@@ -603,24 +650,20 @@ public final class AuthenticationManager
 
     private void scheduleTimeout(Player player, AuthenticationSession session)
     {
-        module.api().scheduler().runEntityLater(player, () ->
+        module.ownTask(player.getScheduler().runDelayed(module.plugin(), ignored ->
         {
             if (isCurrent(player, session))
             {
                 kick(player, session, Component.text("Two-factor authentication timed out.", NamedTextColor.RED));
             }
-        }, AUTHENTICATION_TIMEOUT_TICKS);
+        }, null, AUTHENTICATION_TIMEOUT_TICKS));
     }
 
     private void kick(Player player, AuthenticationSession session, Component reason)
     {
-        synchronized (session)
+        if (!session.terminate())
         {
-            if (session.phase() == AuthenticationPhase.TERMINATING)
-            {
-                return;
-            }
-            session.phase(AuthenticationPhase.TERMINATING);
+            return;
         }
         reconcileIdentity(session).whenComplete((ignored, throwable) ->
         {
@@ -649,7 +692,7 @@ public final class AuthenticationManager
 
     private void onPlayerThread(Player player, Runnable task)
     {
-        module.api().scheduler().runEntity(player, task);
+        module.ownTask(player.getScheduler().run(module.plugin(), ignored -> task.run(), null));
     }
 
     private void disconnect(Player player)

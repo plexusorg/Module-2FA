@@ -1,6 +1,8 @@
 package dev.plex.auth;
 
 import com.destroystokyo.paper.profile.PlayerProfile;
+import dev.plex.api.player.PlexPlayerView;
+import dev.plex.api.player.PlayersApi;
 import dev.plex.integration.PermissionDataBridge;
 import dev.plex.storage.PremiumIdentityRepository;
 import dev.plex.storage.TwoFactorRepository;
@@ -10,23 +12,29 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.player.AsyncPlayerPreLoginEvent;
 
 public final class AccountClassifier
 {
+    private static final int LOOKUP_TIMEOUT_SECONDS = 10;
+    private final PlayersApi players;
     private final PremiumIdentityRepository identityRepository;
     private final TwoFactorRepository twoFactorRepository;
     private final PermissionDataBridge permissionDataBridge;
     private final Map<UUID, LoginEvidence> loginEvidence = new ConcurrentHashMap<>();
 
     public AccountClassifier(
+            PlayersApi players,
             PremiumIdentityRepository identityRepository,
             TwoFactorRepository twoFactorRepository,
             PermissionDataBridge permissionDataBridge)
     {
+        this.players = players;
         this.identityRepository = identityRepository;
         this.twoFactorRepository = twoFactorRepository;
         this.permissionDataBridge = permissionDataBridge;
@@ -50,7 +58,7 @@ public final class AccountClassifier
         {
             try
             {
-                mappedIdentityUuid = identityRepository.find(event.getName()).join().orElse(null);
+                mappedIdentityUuid = await(identityRepository.find(event.getName())).orElse(null);
                 if (mappedIdentityUuid == null)
                 {
                     mappedIdentityUuid = resolveStoredIdentity(event.getName());
@@ -66,10 +74,10 @@ public final class AccountClassifier
             }
         }
         UUID finalUuid = event.getUniqueId();
-        boolean twoFactorConfigured = twoFactorRepository.exists(finalUuid).join();
+        boolean twoFactorConfigured = await(twoFactorRepository.exists(finalUuid));
         if (mappedIdentityUuid == null && finalUuid.version() == 4 && twoFactorConfigured)
         {
-            identityRepository.save(event.getName(), finalUuid).join();
+            await(identityRepository.save(event.getName(), finalUuid));
         }
         loginEvidence.put(event.getUniqueId(), new LoginEvidence(
                 initialUuid,
@@ -112,23 +120,21 @@ public final class AccountClassifier
 
     private UUID resolveStoredIdentity(String username)
     {
-        for (UUID plexUuid : twoFactorRepository.findPlayerUuidsByName(username).join())
+        UUID plexUuid = await(players.byName(username)).map(PlexPlayerView::uuid).orElse(null);
+        if (isProtectedIdentityUuid(plexUuid))
         {
-            if (isProtectedIdentityUuid(plexUuid))
-            {
-                savePremiumIdentity(username, plexUuid);
-                return plexUuid;
-            }
+            savePremiumIdentity(username, plexUuid);
+            return plexUuid;
         }
 
-        UUID forwardLookup = permissionDataBridge.lookupUniqueId(username).join().orElse(null);
+        UUID forwardLookup = await(permissionDataBridge.lookupUniqueId(username)).orElse(null);
         if (isProtectedIdentityUuid(forwardLookup))
         {
             savePremiumIdentity(username, forwardLookup);
             return forwardLookup;
         }
 
-        List<UUID> protectedUuids = twoFactorRepository.findPlayerUuids().join().stream()
+        List<UUID> protectedUuids = await(twoFactorRepository.findPlayerUuids()).stream()
                 .sorted(java.util.Comparator.comparingInt(playerUuid -> playerUuid.version() == 4 ? 0 : 1))
                 .toList();
         for (UUID candidate : protectedUuids)
@@ -137,7 +143,7 @@ public final class AccountClassifier
             {
                 continue;
             }
-            Optional<String> storedUsername = permissionDataBridge.lookupUsername(candidate).join();
+            Optional<String> storedUsername = await(permissionDataBridge.lookupUsername(candidate));
             if (storedUsername.isPresent() && storedUsername.get().equalsIgnoreCase(username))
             {
                 savePremiumIdentity(username, candidate);
@@ -151,15 +157,20 @@ public final class AccountClassifier
     {
         return playerUuid != null
                 && (playerUuid.version() == 3 || playerUuid.version() == 4)
-                && (twoFactorRepository.exists(playerUuid).join()
-                || permissionDataBridge.requiresTwoFactor(playerUuid).join());
+                && (await(twoFactorRepository.exists(playerUuid))
+                || await(permissionDataBridge.requiresTwoFactor(playerUuid)));
     }
 
     private void savePremiumIdentity(String username, UUID playerUuid)
     {
         if (playerUuid.version() == 4)
         {
-            identityRepository.save(username, playerUuid).join();
+            await(identityRepository.save(username, playerUuid));
         }
+    }
+
+    private static <T> T await(CompletableFuture<T> future)
+    {
+        return future.orTimeout(LOOKUP_TIMEOUT_SECONDS, TimeUnit.SECONDS).join();
     }
 }

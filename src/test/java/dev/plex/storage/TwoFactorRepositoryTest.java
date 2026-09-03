@@ -98,10 +98,6 @@ class TwoFactorRepositoryTest
                     .execute();
         });
 
-        TwoFactorRepository accountRepository = new TwoFactorRepository(
-                storage(jdbi), Runnable::run, SecretEncryption.load(dataFolder));
-        assertEquals(List.of(premiumUuid, offlineUuid), accountRepository.findPlayerUuidsByName("TAAHH").join());
-
         jdbi.useHandle(handle ->
         {
             handle.createUpdate("INSERT INTO \"2fa_accounts\" (player_uuid, encrypted_secret, secret_iv, created_at, last_used_step) " +

@@ -17,6 +17,8 @@ import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.bukkit.Bukkit;
 import org.bukkit.permissions.Permission;
 import org.bukkit.permissions.PermissionDefault;
@@ -25,6 +27,7 @@ import org.bukkit.plugin.PluginManager;
 public final class TwoFactorModule extends PlexModule
 {
     private AuthenticationManager authenticationManager;
+    private ExecutorService executor;
     private final List<Permission> registeredPermissions = new ArrayList<>();
 
     @Override
@@ -36,17 +39,18 @@ public final class TwoFactorModule extends PlexModule
     @Override
     public void enable()
     {
+        executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("Plex-2FA-", 0).factory());
         ModuleStorage storage = api().storage().forModule(this);
         try
         {
-            storage.migrations().run(List.of("001_initial_schema", "002_authentication_throttle", "003_premium_identities", "004_backfill_premium_identities"));
+            storage.migrations().run();
             SecretEncryption encryption = SecretEncryption.load(getDataFolder().toPath());
-            TwoFactorRepository repository = new TwoFactorRepository(storage, api().scheduler().asyncExecutor(), encryption);
-            PremiumIdentityRepository identityRepository = new PremiumIdentityRepository(storage, api().scheduler().asyncExecutor());
+            TwoFactorRepository repository = new TwoFactorRepository(storage, executor, encryption);
+            PremiumIdentityRepository identityRepository = new PremiumIdentityRepository(storage, executor);
             PermissionDataBridge permissionDataBridge = permissionDataBridge();
             authenticationManager = new AuthenticationManager(
                     this,
-                    new AccountClassifier(identityRepository, repository, permissionDataBridge),
+                    new AccountClassifier(api().players(), identityRepository, repository, permissionDataBridge),
                     repository,
                     identityRepository,
                     permissionDataBridge,
@@ -60,7 +64,8 @@ public final class TwoFactorModule extends PlexModule
 
         registerPermissions();
         registerListener(new AuthenticationListener(authenticationManager));
-        Bukkit.getOnlinePlayers().forEach(player -> api().scheduler().runEntity(player, () -> authenticationManager.handleJoin(player)));
+        Bukkit.getOnlinePlayers().forEach(player -> ownTask(player.getScheduler().run(plugin(),
+                ignored -> authenticationManager.handleJoin(player), null)));
         getLogger().warn("Offline-mode v4 UUID claims are trusted and installed as player UUIDs; modified clients can spoof these identities");
         getLogger().info("Two-factor authentication enabled");
     }
@@ -70,11 +75,22 @@ public final class TwoFactorModule extends PlexModule
     {
         if (authenticationManager != null)
         {
-            authenticationManager.shutdown();
+            completeShutdownBeforeClose(authenticationManager.shutdown());
+        }
+        if (executor != null)
+        {
+            executor.shutdown();
+            executor = null;
         }
         PluginManager pluginManager = Bukkit.getPluginManager();
         registeredPermissions.forEach(pluginManager::removePermission);
         registeredPermissions.clear();
+    }
+
+    public ExecutorService executor()
+    {
+        if (executor == null) throw new IllegalStateException("Two-factor authentication is not enabled");
+        return executor;
     }
 
     public AuthenticationManager authenticationManager()

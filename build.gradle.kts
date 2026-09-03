@@ -1,5 +1,6 @@
 plugins {
     java
+    checkstyle
 }
 
 repositories {
@@ -14,15 +15,15 @@ repositories {
 }
 
 dependencies {
-    compileOnly("io.papermc.paper:paper-api:26.1.2.build.+")
+    compileOnly("io.papermc.paper:paper-api:26.2.build.+")
     compileOnly("dev.plex:api:2.0-SNAPSHOT")
     compileOnly("net.luckperms:api:5.5")
     testImplementation("dev.plex:api:2.0-SNAPSHOT")
     testImplementation("net.luckperms:api:5.5")
     testImplementation("org.jdbi:jdbi3-core:3.54.0")
-    testImplementation("org.junit.jupiter:junit-jupiter:5.14.3")
-    testImplementation("org.xerial:sqlite-jdbc:3.49.1.0")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.14.3")
+    testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
+    testImplementation("org.xerial:sqlite-jdbc:3.53.4.0")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:6.1.3")
 }
 
 group = "dev.plex"
@@ -31,6 +32,11 @@ description = "Two-factor authentication module for Plex"
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(25))
+}
+
+checkstyle {
+    toolVersion = "14.1.0"
+    configFile = rootProject.file("config/checkstyle/checkstyle.xml")
 }
 
 tasks.jar {
@@ -47,5 +53,6 @@ tasks {
     }
     test {
         useJUnitPlatform()
+        jvmArgs("--enable-native-access=ALL-UNNAMED")
     }
 }

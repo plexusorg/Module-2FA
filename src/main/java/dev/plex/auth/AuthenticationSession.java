@@ -66,9 +66,14 @@ final class AuthenticationSession
         return enrollmentAuthorized;
     }
 
-    public void authorizeEnrollment()
+    public synchronized boolean authorizeEnrollment()
     {
+        if (phase != AuthenticationPhase.AWAITING_ENROLLMENT_APPROVAL)
+        {
+            return false;
+        }
         enrollmentAuthorized = true;
+        return true;
     }
 
     public boolean chatInputMode()
@@ -76,9 +81,14 @@ final class AuthenticationSession
         return chatInputMode;
     }
 
-    public void chatInputMode(boolean chatInputMode)
+    public synchronized AuthenticationPhase enableChatInput()
     {
-        this.chatInputMode = chatInputMode;
+        if (phase != AuthenticationPhase.ENROLLING && phase != AuthenticationPhase.VERIFYING)
+        {
+            return null;
+        }
+        chatInputMode = true;
+        return phase;
     }
 
     public int recordFailedAttempt()
@@ -91,9 +101,56 @@ final class AuthenticationSession
         return phase;
     }
 
-    public void phase(AuthenticationPhase phase)
+    public synchronized boolean transition(AuthenticationPhase expected, AuthenticationPhase next)
     {
-        this.phase = phase;
+        if (phase != expected)
+        {
+            return false;
+        }
+        phase = next;
+        return true;
+    }
+
+    public synchronized boolean terminate()
+    {
+        if (phase == AuthenticationPhase.TERMINATING)
+        {
+            return false;
+        }
+        phase = AuthenticationPhase.TERMINATING;
+        return true;
+    }
+
+    public synchronized void awaitEnrollmentApproval()
+    {
+        phase = AuthenticationPhase.AWAITING_ENROLLMENT_APPROVAL;
+    }
+
+    public synchronized void beginEnrollment(byte[] secret)
+    {
+        pendingSecret = secret;
+        phase = AuthenticationPhase.ENROLLING;
+    }
+
+    public synchronized void beginVerification(TwoFactorAccount account)
+    {
+        this.account = account;
+        phase = AuthenticationPhase.VERIFYING;
+    }
+
+    public synchronized void beginReset()
+    {
+        phase = AuthenticationPhase.RESETTING;
+    }
+
+    public synchronized boolean prepareFailedVerification()
+    {
+        if (phase != AuthenticationPhase.VERIFYING && phase != AuthenticationPhase.PROCESSING)
+        {
+            return false;
+        }
+        phase = AuthenticationPhase.PROCESSING;
+        return true;
     }
 
     public byte[] pendingSecret()
@@ -101,18 +158,9 @@ final class AuthenticationSession
         return pendingSecret;
     }
 
-    public void pendingSecret(byte[] pendingSecret)
-    {
-        this.pendingSecret = pendingSecret;
-    }
-
     public TwoFactorAccount account()
     {
         return account;
     }
 
-    public void account(TwoFactorAccount account)
-    {
-        this.account = account;
-    }
 }

@@ -3,11 +3,17 @@ package dev.plex.integration;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 @FunctionalInterface
 public interface PermissionDataBridge
 {
     CompletableFuture<Void> reconcile(UUID crackedUuid, UUID premiumUuid, String username);
+
+    default void reconcileForShutdown(UUID crackedUuid, UUID premiumUuid, String username, long timeoutNanos) throws Exception
+    {
+        reconcile(crackedUuid, premiumUuid, username).get(timeoutNanos, TimeUnit.NANOSECONDS);
+    }
 
     default CompletableFuture<Optional<UUID>> lookupUniqueId(String username)
     {
