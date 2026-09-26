@@ -4,6 +4,7 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.plex.TwoFactorModule;
 import dev.plex.TwoFactorPermissions;
 import dev.plex.api.player.PlexPlayerView;
+import dev.plex.command.exception.PlayerNotFoundException;
 import dev.plex.command.source.RequiredCommandSource;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import java.util.ArrayList;
@@ -90,17 +91,14 @@ public final class TwoFactorCommand extends SimplePlexCommand
         }
 
         checkPermission(sender, TwoFactorPermissions.ADMIN);
-        Player onlineTarget = onlinePlayer(targetInput);
-        if (onlineTarget != null)
-        {
-            reset(sender, targetInput, onlineTarget.getUniqueId(), onlineTarget);
-            return null;
-        }
-
         playerLookup(targetInput).whenComplete((target, lookupFailure) ->
         {
             if (lookupFailure != null)
             {
+                if (sendPlayerLookupFailure(sender, lookupFailure))
+                {
+                    return;
+                }
                 sender.sendMessage(Component.text("Unable to look up " + targetInput + ".", NamedTextColor.RED));
                 module.getLogger().error("Unable to look up two-factor authentication target {}", targetInput, lookupFailure);
                 return;
@@ -110,7 +108,8 @@ public final class TwoFactorCommand extends SimplePlexCommand
                 sender.sendMessage(Component.text("That player has never joined the server.", NamedTextColor.RED));
                 return;
             }
-            reset(sender, targetInput, target.orElseThrow().uuid(), null);
+            UUID targetUuid = target.orElseThrow().uuid();
+            reset(sender, targetInput, targetUuid, Bukkit.getPlayer(targetUuid));
         });
         return null;
     }
@@ -158,11 +157,11 @@ public final class TwoFactorCommand extends SimplePlexCommand
     {
         try
         {
-            return Bukkit.getPlayer(UUID.fromString(input));
+            return getNonNullPlayer(input);
         }
-        catch (IllegalArgumentException ignored)
+        catch (PlayerNotFoundException ignored)
         {
-            return Bukkit.getPlayerExact(input);
+            return null;
         }
     }
 
@@ -174,7 +173,7 @@ public final class TwoFactorCommand extends SimplePlexCommand
         }
         catch (IllegalArgumentException ignored)
         {
-            return api().players().byName(input);
+            return api().players().resolveCommandPlayer(input);
         }
     }
 
