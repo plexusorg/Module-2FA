@@ -16,9 +16,9 @@ repositories {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:26.2.build.+")
-    compileOnly("dev.plex:api:2.0-SNAPSHOT")
+    compileOnly("dev.plex:api:2.0")
     compileOnly("net.luckperms:api:5.5")
-    testImplementation("dev.plex:api:2.0-SNAPSHOT")
+    testImplementation("dev.plex:api:2.0")
     testImplementation("net.luckperms:api:5.5")
     testImplementation("org.jdbi:jdbi3-core:3.55.0")
     testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
@@ -27,7 +27,7 @@ dependencies {
 }
 
 group = "dev.plex"
-version = "2.0-SNAPSHOT"
+version = "2.0"
 description = "Two-factor authentication module for Plex"
 
 java {
