@@ -1,5 +1,5 @@
 name: Module-2FA
 main: dev.plex.TwoFactorModule
 description: Two-factor authentication for Plex
-version: 2.0
+version: 2.0.1-SNAPSHOT
 apiCompatibility: 1
