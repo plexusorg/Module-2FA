@@ -9,7 +9,7 @@ repositories {
         url = uri("https://repo.papermc.io/repository/maven-public/")
     }
     maven {
-        url = uri("https://nexus.telesphoreo.me/repository/plex/")
+        url = uri("https://telesphorepo.com/maven/plex/")
     }
     mavenCentral()
 }
